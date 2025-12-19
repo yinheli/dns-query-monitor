@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     info!("Interface: {interface}");
 
     info!("Starting packet capture...");
-    let (capture_handle, event_rx) = pcap::CaptureLoader::load(&interface)?;
+    let (_capture_handle, event_rx, cancel_token) = pcap::CaptureLoader::load(&interface)?;
     info!("Packet capture started successfully");
 
     let collector = DnsCollector::new(event_rx);
@@ -70,8 +70,15 @@ async fn main() -> Result<()> {
 
     info!("DNS Query Monitor stopped");
 
-    drop(collector_handle);
-    let _ = capture_handle.await;
+    // Cancel packet capture first
+    info!("Cancelling packet capture...");
+    cancel_token.cancel();
 
+    // Drop the collector to close the channel
+    drop(collector_handle);
+
+    // Don't wait for the capture handle - let it finish in background
+    // This is a workaround for pcap blocking issues on some systems
+    info!("DNS Query Monitor stopped");
     exit(0)
 }

@@ -3,9 +3,12 @@ use crate::dns::{DnsQueryEvent, MAX_ANSWER_LEN, MAX_DOMAIN_LEN};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use log::{debug, info, warn};
-use pcap::{Capture, Device};
+use pcap::{Capture, Device, Error};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 const DNS_PORT: u16 = 53;
 
@@ -37,18 +40,30 @@ impl CaptureLoader {
         bail!("No suitable network interface found")
     }
 
-    pub fn load(interface: &str) -> Result<(JoinHandle<()>, mpsc::Receiver<DnsQueryEvent>)> {
+    pub fn load(
+        interface: &str,
+    ) -> Result<(
+        JoinHandle<()>,
+        mpsc::Receiver<DnsQueryEvent>,
+        CancellationToken,
+    )> {
         info!("Opening capture on interface: {interface}");
 
         let mut cap = if interface == "any" {
-            Capture::from_device("any")?.immediate_mode(true).open()?
+            Capture::from_device("any")?
+                .immediate_mode(true)
+                .timeout(100)
+                .open()?
         } else {
             let device = Device::list()?
                 .into_iter()
                 .find(|d| d.name == interface)
                 .context(format!("Interface {interface} not found"))?;
 
-            Capture::from_device(device)?.immediate_mode(true).open()?
+            Capture::from_device(device)?
+                .immediate_mode(true)
+                .timeout(100)
+                .open()?
         };
 
         cap.filter("udp port 53", true)?;
@@ -56,28 +71,56 @@ impl CaptureLoader {
         info!("Capture started on interface: {interface}");
 
         let (tx, rx) = mpsc::channel(10000);
+        let cancel_token = CancellationToken::new();
+        let token_clone = cancel_token.clone();
+
+        // Use Arc<AtomicBool> for faster cancellation checking
+        let should_stop = Arc::new(AtomicBool::new(false));
+        let should_stop_clone = should_stop.clone();
 
         let handle = tokio::task::spawn_blocking(move || {
-            loop {
+            while !should_stop_clone.load(Ordering::Relaxed) {
+                // First check if we should stop before trying to read
+                if should_stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 match cap.next_packet() {
                     Ok(packet) => {
-                        if let Some(event) = parse_dns_packet(packet.data)
-                            && tx.blocking_send(event).is_err()
-                        {
-                            warn!("Failed to send event: channel closed");
+                        // Check stop flag after getting packet too
+                        if should_stop_clone.load(Ordering::Relaxed) {
                             break;
                         }
+
+                        if let Some(event) = parse_dns_packet(packet.data) {
+                            if tx.blocking_send(event).is_err() {
+                                info!("Channel closed, stopping capture");
+                                break;
+                            }
+                        }
                     }
-                    Err(pcap::Error::TimeoutExpired) => {}
+                    Err(Error::TimeoutExpired) => {
+                        // Timeout is expected, loop back to check stop flag
+                        continue;
+                    }
                     Err(e) => {
                         warn!("Error reading packet: {e}");
+                        // Don't break on packet errors, just continue unless stopped
+                        continue;
                     }
                 }
             }
             info!("Packet capture task terminated");
         });
 
-        Ok((handle, rx))
+        // Set the stop flag when token is cancelled
+        let stop_handle = should_stop.clone();
+        tokio::spawn(async move {
+            token_clone.cancelled().await;
+            stop_handle.store(true, Ordering::Relaxed);
+        });
+
+        Ok((handle, rx, cancel_token))
     }
 }
 
