@@ -1,0 +1,164 @@
+name: Create release and upload binaries
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  github_build:
+    name: Build release binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: dns-query-monitor-x86_64-unknown-linux-gnu.tar.gz
+
+          # ARM64 runner not available in GitHub Actions
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-latest-arm64
+          #   name: dns-query-monitor-aarch64-unknown-linux-gnu.tar.gz
+
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup | System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Setup | Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Post Build | Prepare artifacts
+        run: |
+          cp README.md target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/release
+          tar czvf ../../../${{ matrix.name }} dns-query-monitor README.md
+          cd -
+
+      - name: Deploy | Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  upload_artifacts:
+    name: Add Build Artifacts to Release
+    needs: [github_build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup | Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dns-query-monitor-*.tar.gz
+
+      - name: Display structure of downloaded files
+        run: ls -R
+
+      - name: Setup | Checksums
+        run: |
+          for file in dns-query-monitor-*/dns-query-monitor-*.tar.gz; do
+            if [ -f "$file" ]; then
+              openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"
+            fi
+          done
+
+      - name: Generate Release Notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --tag ${{ github.ref_name }}
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Display generated changelog
+        run: cat CHANGELOG.md
+
+      - name: Build | Add Artifacts to Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          body_path: CHANGELOG.md
+          files: |
+            dns-query-monitor-*/dns-query-monitor-*.tar.gz
+            dns-query-monitor-*/dns-query-monitor-*.tar.gz.sha256
+
+  publish_crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup | System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
+          sudo rm -rf /var/lib/apt/lists/*
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish | crates.io
+        uses: katyo/publish-crates@v2
+        with:
+          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          ignore-unpublished-changes: true
+
+  publish_docker:
+    name: Publish to Docker Hub
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup | QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup | Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push multi-arch images
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          platforms: linux/amd64,linux/arm64
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          tags: |
+            yinheli/dns-query-monitor:latest
+            yinheli/dns-query-monitor:${{ github.ref_name }}
