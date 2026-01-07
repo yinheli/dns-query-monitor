@@ -92,11 +92,11 @@ impl CaptureLoader {
                             break;
                         }
 
-                        if let Some(event) = parse_dns_packet(packet.data) {
-                            if tx.blocking_send(event).is_err() {
-                                info!("Channel closed, stopping capture");
-                                break;
-                            }
+                        if let Some(event) = parse_dns_packet(packet.data)
+                            && tx.blocking_send(event).is_err()
+                        {
+                            info!("Channel closed, stopping capture");
+                            break;
                         }
                     }
                     Err(Error::TimeoutExpired) => {
