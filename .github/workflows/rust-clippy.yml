@@ -2,6 +2,7 @@ name: Clippy
 permissions:
   contents: read
   security-events: write
+  actions: read
 
 on:
   push:
@@ -52,8 +53,9 @@ jobs:
         continue-on-error: true
 
       - name: Upload analysis results to GitHub
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        # Only upload SARIF on push events or PRs from the same repository (not forks)
+        if: always() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: rust-clippy-results.sarif
           wait-for-processing: true
