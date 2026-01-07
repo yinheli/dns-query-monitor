@@ -1,6 +1,6 @@
 [package]
 name = "dns-query-monitor"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["yinheli <yinheli@gmail.com>"]
 description = "Real-time DNS query monitoring tool with Terminal User Interface"
@@ -19,7 +19,7 @@ crossterm = "0.29"
 env_logger = "0.11"
 log = "0.4"
 pcap = "2.0"
-ratatui = "0.29"
+ratatui = "0.30"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 
